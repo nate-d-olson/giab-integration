@@ -1,0 +1,241 @@
+---
+title: "Asian Parents High Confidence QC"
+author: "Nate Olson"
+date: "8/6/2018"
+output: html_document
+---
+
+## To Do
+- Calculate coverage for non-N positions  
+- Compare HG005 and trio SV bed files
+- Check Ti/Tv calculation - which variants to include
+- Variants/Mg for high confidence regions 
+- Check Het/Hom ratio
+- Add stats from trio after phasing
+- Incorporate benchmarking results
+
+
+```{r message = FALSE}
+library(tidyverse)
+library(rtracklayer)
+library(GenomicRanges)
+library(BSgenome)
+library(VariantAnnotation)
+```
+
+
+```{r}
+grch37 <- "BSgenome.Hsapiens.1000genomes.hs37d5"
+hg005_bedfile <- "data/HG005_GRCh37_highconf_CG-IllFB-IllGATKHC-Ion-SOLID_CHROM1-22_v.3.3.2_highconf.bed"
+hg005_bed <- import(hg005_bedfile, genome = grch37)
+hg006_bedfile <- "data/HG006_GIAB_GRCh37_highconf_CG-IllFB-IllSNT-10X_allChrom_v3.3_highconf.bed"
+hg006_bed <- import(hg006_bedfile, genome = grch37)
+hg007_bedfile <- "data/HG007_GIAB_GRCh37_highconf_CG-IllFB-IllSNT-10X_allChrom_v3.3_highconf.bed"
+hg007_bed <- import(hg007_bedfile, genome = grch37)
+
+hg005_vcffile <- "data/HG005_GRCh37_highconf_CG-IllFB-IllGATKHC-Ion-SOLID_CHROM1-22_v.3.3.2_highconf.vcf.gz"
+hg005_vcf <- readVcf(hg005_vcffile, genome = grch37)
+hg006_vcffile <- "data/HG006_GIAB_GRCh37_highconf_CG-IllFB-IllSNT-10X_allChrom_v3.3_highconf.vcf.gz"
+hg006_vcf <- readVcf(hg006_vcffile, genome = grch37)
+hg007_vcffile <- "data/HG007_GIAB_GRCh37_highconf_CG-IllFB-IllSNT-10X_allChrom_v3.3_highconf.vcf.gz"
+hg007_vcf <- readVcf(hg007_vcffile, genome = grch37)
+```
+
+
+
+```{r}
+get_cov_df <- function(bed){
+    cov <- coverage(bed)
+    tablist <- List(lapply(cov, table))
+    mcols(tablist)$len <- lengths(cov, use.names = FALSE)
+    covhist <- stack(tablist, "seqnames", "count", "coverage")
+    margin <- aggregate(covhist, ~coverage, 
+                        count = sum(NumericList(count)))[-1L]
+    margin <- DataFrame(seqnames = Rle("genome"), 
+                        margin, 
+                        len = sum(as.numeric(lengths(cov))))
+    covhist <- rbind(covhist, margin)
+    ans <- within(covhist, fraction <- count/len)
+    
+    as.data.frame(ans) %>% 
+        filter(seqnames %in% c(1:22, "genome"), 
+               coverage == 1)
+}
+
+```
+
+
+```{r}
+cov_df <- list(HG005 = hg005_bed, HG006 = hg006_bed, HG007 = hg007_bed) %>% 
+    map_df(get_cov_df, .id = "hgref")
+```
+
+0 used to indicate full genome.
+```{r fig.cap = "Fraction of genome, chrom 0, and individual chromosomes covered by high confidence regions."}
+cov_df %>% 
+    mutate(seqnames = if_else(seqnames == "genome", "0", as.character(seqnames)),
+           seqnames = as.numeric(seqnames)) %>% 
+    ggplot() + 
+    geom_bar(aes(x = seqnames, y = fraction, fill = hgref), 
+             width = 0.4, position = "dodge", stat = "identity") +
+    theme_bw()
+```
+
+Coverage slightly lower for HG006 and HG007
+```{r}
+cov_df %>% filter(seqnames == "genome")
+```
+
+
+## Variant Summaries
+
+```{r}
+get_var_summary_df <- function(vcf){
+    ## full genome
+    nvar <- nrow(vcf)
+    ti_lgl <- isTransition(vcf)
+    titv <- sum(ti_lgl)/sum(!ti_lgl)
+    
+    ## Metrics for individual chromosomes
+    for(i in 1:22){
+        chrom_vcf <- subset(vcf, seqnames(vcf) == i)
+        nvar <- c(nvar, nrow(chrom_vcf))
+        ti_lgl <- isTransition(chrom_vcf)
+        titv <- c(titv, sum(ti_lgl)/sum(!ti_lgl))
+    }
+    data.frame(CHROM = 0:22, nvar, titv)
+}
+```
+
+```{r}
+variant_df <- list(HG005 = hg005_vcf, 
+                   HG006 = hg006_vcf, 
+                   HG007 = hg007_vcf) %>% 
+    map_df(get_var_summary_df, .id = "hgref") 
+```
+
+Number of variants by chromosome
+```{r}
+variant_df %>% dplyr::select(-titv) %>% spread(hgref, nvar)
+```
+
+Ti/Tv for whole genome (CHROM 0) and individual chromosomes. 
+```{r}
+variant_df %>% dplyr::select(-nvar) %>% spread(hgref, titv)
+```
+
+## Stats from Trio Harmonizer 
+
+Stats from command `rtg vcfstats clean-sp.vcf.gz`
+
+```
+Location                     : clean-sp.vcf.gz
+Failed Filters               : 0
+Passed Filters               : 4234950
+Sample Name: child
+SNPs                         : 2744181
+MNPs                         : 0
+Insertions                   : 140043
+Deletions                    : 144165
+Indels                       : 3332
+Same as reference            : 1203229
+Phased Genotypes             : 100.0% (4234950/4234950)
+SNP Transitions/Transversions: 2.11 (2751990/1302568)
+Total Het/Hom ratio          : 1.13 (1605890/1425831)
+SNP Het/Hom ratio            : 1.10 (1434540/1309641)
+MNP Het/Hom ratio            : - (0/0)
+Insertion Het/Hom ratio      : 1.25 (77903/62140)
+Deletion Het/Hom ratio       : 1.68 (90290/53875)
+Indel Het/Hom ratio          : 18.04 (3157/175)
+Insertion/Deletion ratio     : 0.97 (140043/144165)
+Indel/SNP+MNP ratio          : 0.10 (287540/2744181)
+Sample Name: dad
+SNPs                         : 2764989
+MNPs                         : 0
+Insertions                   : 162786
+Deletions                    : 168876
+Indels                       : 2496
+Same as reference            : 1135803
+SNP Transitions/Transversions: 2.11 (2770897/1314721)
+Total Het/Hom ratio          : 1.16 (1664733/1434414)
+SNP Het/Hom ratio            : 1.09 (1445098/1319891)
+MNP Het/Hom ratio            : - (0/0)
+Insertion Het/Hom ratio      : 1.65 (101322/61464)
+Deletion Het/Hom ratio       : 2.19 (115997/52879)
+Indel Het/Hom ratio          : 12.87 (2316/180)
+Insertion/Deletion ratio     : 0.96 (162786/168876)
+Indel/SNP+MNP ratio          : 0.12 (334158/2764989)
+Sample Name: mom
+SNPs                         : 2781592
+MNPs                         : 0
+Insertions                   : 164174
+Deletions                    : 171781
+Indels                       : 2380
+Same as reference            : 1115023
+SNP Transitions/Transversions: 2.11 (2777271/1318934)
+```
+
+
+`rtg vcfstats vcfchildgz.vcf.gz`
+
+```
+Original calls: 9.8% (354378/3627296)
+Location                     : vcfchildgz.vcf.gz
+Failed Filters               : 0
+Passed Filters               : 3627296
+SNPs                         : 3192738
+MNPs                         : 0
+Insertions                   : 206705
+Deletions                    : 218900
+Indels                       : 8953
+Same as reference            : 0
+Phased Genotypes             : 9.8% (354378/3627296)
+SNP Transitions/Transversions: 2.10 (3098634/1477457)
+Total Het/Hom ratio          : 1.33 (2068423/1558873)
+SNP Het/Hom ratio            : 1.31 (1810319/1382419)
+MNP Het/Hom ratio            : - (0/0)
+Insertion Het/Hom ratio      : 1.32 (117576/89129)
+Deletion Het/Hom ratio       : 1.52 (132087/86813)
+Indel Het/Hom ratio          : 16.49 (8441/512)
+Insertion/Deletion ratio     : 0.94 (206705/218900)
+Indel/SNP+MNP ratio          : 0.14 (434558/3192738)
+```
+
+VCF Eval: `rtg vcfeval --ref-overlap --Xobey-phase=true,true --XXcom.rtg.vcf.eval.custom-path-processor=phase-transfer -t rtgsdf -b clean-sp.vcf.gz -c unphased-calls.vcf.gz -o phase-transfer-sp --sample child,INTEGRATION`
+
+```
+Threshold  True-pos-baseline  True-pos-call  False-pos  False-neg  Precision  Sensitivity  F-measure
+----------------------------------------------------------------------------------------------------
+  117.000            3009860        3009873     564558      21861     0.8421       0.9928     0.9112
+     None            3031684        3031705     595591         37     0.8358       1.0000     0.9106
+```
+
+For comparison values from AJ Trio. 
+Similar number of TP, FP, but order of magnitude fewer FN with AJ compared to Asian trio. 
+Not sure if this is due to different threshold values. 
+
+```
+rtg vcfeval --ref-overlap --Xobey-phase=true,true --XXcom.rtg.vcf.eval.custom-path-processor=phase-transfer -t rtgsdf -b clean-sp.vcf.gz -c unphased-calls.vcf.gz -o phase-transfer-sp --sample child,INTEGRATION
+
+Threshold  True-pos-baseline  True-pos-call  False-pos  False-neg  Precision  Sensitivity  F-measure
+----------------------------------------------------------------------------------------------------
+  100.000            3026791        3026854     563160       2805     0.8431       0.9991     0.9145
+     None            3029515        3029578     566543         81     0.8425       1.0000     0.9145
+```
+
+## Trio Inconsistencies
+```{r}
+trio_vcffile <- "data/HG005_HG006_HG007-GRCh37_v3.3_highconf_trio_trioinconsistent.vcf.gz"
+trio_vcf <- readVcf(trio_vcffile, genome = grch37)
+```
+
+__Notes__
+- All from chromosome 1
+- Only 1:4582785_A/AATCTATCT had a FILTER PASS value with a qual value of 50. The rest of the variants had `NA` and `.` QUAL and FILTER values respectively. 
+
+```{r}
+rowRanges(trio_vcf) %>% as.data.frame() %>% 
+    dplyr::select(-seqnames, -strand, -paramRangeID, -QUAL, -FILTER) %>% 
+    DT::datatable()
+```
+
