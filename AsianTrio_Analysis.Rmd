@@ -1,0 +1,293 @@
+---
+title: "Asian Trio Analysis"
+author: "Nate Olson"
+date: "8/31/2018"
+output: html_document
+---
+
+```{r}
+library(GenomicRanges)
+library(BSgenome)
+library(VariantAnnotation)
+library(tidyverse)
+```
+
+## Objective
+Summarize high confidence callsets for HG002-HG007 to help identify potential reasons for lower number of mendelian violations in Asian trio compared to AJ trio and de novo variants in HG005 compared to HG002.
+
+## Overview
+For the AJ trio 2038 mendelian violations were identified. 
+With 1323 classified as cell-line somatic or de novo mutations, 1110 SNPs and 213 indels). 
+
+## Call set comparisons 
+
+Compare 
+- High confidence regions (need no inconsistent for AJ Trio)
+- Number of variants 
+- Number of variants in high confidence regions
+
+
+### High Confidence Region Size
+```{r}
+grch37 <- "BSgenome.Hsapiens.1000genomes.hs37d5"
+high_conf_bed_files <- list.files("data", 
+                                  pattern = "highconf.*bed", 
+                                  recursive = TRUE, 
+                                  full.names = TRUE) %>% 
+    set_names(str_extract(., "HG00."))
+
+high_conf_beds <- high_conf_bed_files %>% 
+    map(import, genome = grch37)
+```
+
+
+Non-N chrom sizes
+```{r}
+get_alpha_freq <- function(i){
+    BSgenome.Hsapiens.1000genomes.hs37d5[[i]] %>% 
+        alphabetFrequency() %>% 
+        as.data.frame()
+}
+alpha_freq_df <- as.list(1:22) %>% 
+    map_dfc(get_alpha_freq)
+
+colnames(alpha_freq_df) <- paste0("chr",1:22)
+
+alpha_freq_df <- alpha_freq_df %>% 
+    filter(chr1 != 0) %>% 
+    add_column(base = c("A","C","G","T","N"))
+
+chromosome_lengths <- alpha_freq_df %>% 
+    gather(key = "chrom", value = "nbases", -base) %>% 
+    group_by(chrom) %>% 
+    mutate(base_type = if_else(base == "N", "N", "non_N")) %>% 
+    group_by(chrom, base_type) %>% 
+    summarise(n_bases = sum(nbases)) %>% 
+    spread(base_type, n_bases) %>% 
+    mutate(len = N + non_N)
+
+chromosome_lengths <- data_frame(chrom = "genome", 
+                                 N = sum(chromosome_lengths$N),
+                                 non_N = sum(chromosome_lengths$non_N),
+                                 len = sum(chromosome_lengths$len)) %>% 
+    bind_rows(chromosome_lengths)
+```
+
+
+```{r}
+get_cov_df <- function(bed){
+    cov <- coverage(bed)[1:22]
+    tablist <- List(lapply(cov, table))
+    mcols(tablist)$len <- lengths(cov, use.names = FALSE)
+    covhist <- stack(tablist, "seqnames", "count", "coverage")
+    margin <- aggregate(covhist, ~coverage, 
+                        count = sum(NumericList(count)))[-1L]
+    margin <- DataFrame(seqnames = Rle("genome"), 
+                        margin, 
+                        len = sum(as.numeric(lengths(cov))))
+    covhist <- rbind(covhist, margin)
+    ans <- within(covhist, fraction <- count/len)
+    
+    as.data.frame(ans) %>% 
+        filter(seqnames %in% c(1:22, "genome"), 
+               coverage == 1)
+}
+
+cov_df <- high_conf_beds %>% 
+    map_dfr(get_cov_df, .id = "hgref") %>% 
+    mutate(seqnames = as.character(seqnames)) %>%
+    mutate(chrom = if_else( seqnames != "genome", 
+                            paste0("chr", seqnames), 
+                            as.character(seqnames))) %>% 
+    dplyr::select(hgref, chrom, count, len, fraction) %>% 
+    left_join(chromosome_lengths) %>% 
+    mutate(frac_non_N = count/non_N)
+```
+
+```{r}
+metric_df <- cov_df %>% dplyr::select(-len, -N, -non_N) %>% 
+    gather("metric","value", -hgref, -chrom) %>% 
+    mutate(chrom = factor(chrom, levels = c("genome",paste0("chr",1:22))))
+
+metric_df %>% 
+    filter(chrom != "genome" | metric != "count") %>% 
+    ggplot() + geom_point(aes(x = chrom, y = value, color = hgref), 
+                          position = position_dodge(width = 0.9)) + 
+    facet_wrap(~metric, scales = "free_y", ncol = 1) + 
+    theme_bw() + 
+    theme(axis.text.x = element_text(angle = -45, hjust = 0))
+```
+
+
+### High Confidence Variants
+
+
+```{r}
+get_var_summary_df <- function(vcf){
+    ## full genome
+    nvar <- nrow(vcf)
+    # ti_lgl <- isTransition(vcf)
+    # titv <- sum(ti_lgl)/sum(!ti_lgl)
+    
+    ## Metrics for individual chromosomes
+    for(i in 1:22){
+        chrom_vcf <- subset(vcf, seqnames(vcf) == i)
+        nvar <- c(nvar, nrow(chrom_vcf))
+    }
+    data.frame(CHROM = 0:22, nvar)
+}
+
+read_and_summarize_vcf <- function(vcf_file, ref_genome = grch37){
+    vcf <- readVcf(vcf_file, genome = ref_genome)
+
+    get_var_summary_df(vcf)
+}
+```
+
+```{r}
+if(file.exists("highconf_variant_df.RDS")){
+    highconf_variant_df <- readRDS("highconf_variant_df.RDS")
+} else {
+    highconf_variant_df <- list.files("data", 
+                           pattern = "CHROM.*highconf.*vcf.gz$", 
+                           full.names = TRUE) %>% 
+        set_names(str_extract(.,"HG00.")) %>% 
+        map_dfr(read_and_summarize_vcf, .id = "hgref")
+    
+    ## Save file to prevent having to run code again
+    saveRDS(highconf_variant_df, "highconf_variant_df.RDS")
+}
+```
+
+
+### High confidence variants in high confidence regions 
+Not sure if the HG005 triophased or *_highconf.vcf.gz should be use
+```{bash}
+## HG002 - different file format 
+bedtools intersect -header \
+    -a data/HG002_GRCh37_GIAB_highconf_CG-IllFB-IllGATKHC-Ion-10X-SOLID_CHROM1-22_v.3.3.2_highconf_triophased.vcf.gz \
+    -b data/HG002_GRCh37_GIAB_highconf_CG-IllFB-IllGATKHC-Ion-10X-SOLID_CHROM1-22_v.3.3.2_highconf_noinconsistent.bed \
+    > HG002_high_high.vcf
+    bgzip HG002_high_high.vcf
+    tabix HG002_high_high.vcf.gz
+    
+
+for i in 3 4 5 6 7; do
+    ## Get high confidence variants in high confidence regions
+    bedtools intersect -header \
+        -a data/HG00${i}*_highconf.vcf.gz \
+        -b data/HG00${i}*_highconf_noinconsistent.bed > HG00${i}_high_high.vcf
+    bgzip HG00${i}_high_high.vcf
+    tabix HG00${i}_high_high.vcf.gz
+done
+
+
+## Calculate summary statistics
+#for i in 2 3 4 5 6 7;
+#    ## Get whole genome variant stats
+#    rtg vcfstats HG00${i}_high_high.vcf.gz > HG00${i}_high_high_chr1-22.stats.txt
+#    
+#    ## Get chromsome level stats
+#    for j in {1::22}; do
+#       tabix -h HG00${i}_high_high.vcf.gz ${i} > HG00${i}_high_high_chr${j}.vcf
+#        rtg vcfstats HG00${i}_high_high_chr${j}.vcf.gz > HG00${i}_high_high_chr${j}_stats.txt
+#        rm HG00${i}_high_high.vcf.gz
+#    done
+#    rm HG00${i}_high_high.vcf.gz
+#done
+```
+
+
+```{r}
+if(file.exists("highhigh_variant_df.RDS")){
+    highhigh_variant_df <- readRDS("highhigh_variant_df.RDS")
+} else {
+    highhigh_variant_df <- list.files(".", 
+                           pattern = "high_high.vcf.gz$", 
+                           full.names = TRUE) %>% 
+    set_names(str_extract(.,"HG00.")) %>% 
+    map_dfr(read_and_summarize_vcf, .id = "hgref")
+    
+    ## Save file to prevent having to run code again
+    saveRDS(highhigh_variant_df, "highhigh_variant_df.RDS")
+}
+
+```
+
+### Combining
+```{r}
+hc <- highconf_variant_df %>% 
+    dplyr:: rename(highconf = nvar)
+```
+
+
+```{r}
+hh <- highhigh_variant_df %>% 
+    dplyr::rename(highhigh = nvar)
+
+v_df <- left_join(hc, hh) %>% 
+    mutate(chrom = if_else(CHROM == 0, "genome", paste0("chr", CHROM))) %>% 
+    dplyr::select(-CHROM)
+```
+
+
+```{r}
+metric_df <- cov_df %>% 
+    dplyr::select(hgref, chrom, count, frac_non_N) %>% 
+    left_join(v_df)
+```
+
+## Whole Genome Summary Table
+TODO - multiple entries for HG005, HG006, HG007 - these are for the bed files with and without inconsistencies
+```{r}
+metric_df %>% filter(chrom == "genome") %>% distinct() %>% 
+    knitr::kable(digits = 3) 
+```
+
+
+## Variant Filter Reasons
+
+Getting variant filter counts for each individual
+```{bash}
+for i in 5 6 7; do
+    zgrep -v ^# data/HG00${i}*_all.vcf.gz | \
+        awk 'length($4)+length($5)>2' | \
+        cut -f7 | sort | uniq -c > HG00${i}_filter.counts
+done
+```
+
+
+TODO- Combine and print as table 
+```{r}
+list.files(".", pattern = "*_filter.counts") %>% 
+    set_names(str_extract(., "HG00.")) %>% 
+    map_dfr(read_tsv, col_names = NULL)
+```
+
+## SV Bed file comparisons
+
+__Bed total sizes__
+
+AJ Trio
+```{bash}
+awk '{ sum+=$3; sum-=$2 } END { print sum }' data/HG002_HG003_HG004_allsvs_merged.bed
+```
+
+Asian Son
+```{bash}
+awk '{ sum+=$3; sum-=$2 } END { print sum }' data/HG005_FB_GATKHC_CG_allsvs_merged.bed
+```
+
+Asian Trio
+```{bash}
+awk '{ sum+=$3; sum-=$2 } END { print sum }' data/HG005_HG006_HG007_FB_GATKHC_CG_MetaSV_allsvs_merged.bed
+```
+
+|SV File    | Filter Size |
+|:---------:|------------:|
+|AJ Trio    | 189,657,731 |
+|Asian Trio | 112,737,345 |
+|Asian Son  |  15,826,002 |
+
+The Asian Trio bed file is an order of magnitute larger than the Asian son SV bed file.
+
