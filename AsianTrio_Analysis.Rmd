@@ -5,7 +5,7 @@ date: "8/31/2018"
 output: html_document
 ---
 
-```{r}
+```{r message = FALSE, warning = FALSE}
 library(GenomicRanges)
 library(BSgenome)
 library(VariantAnnotation)
@@ -13,11 +13,18 @@ library(tidyverse)
 ```
 
 ## Objective
-Summarize high confidence callsets for HG002-HG007 to help identify potential reasons for lower number of mendelian violations in Asian trio compared to AJ trio and de novo variants in HG005 compared to HG002.
+Summarize high confidence callsets for HG002-HG007 to help identify potential reasons for lower number of mendelian violations in Chinese trio compared to AJ trio and de novo variants in HG005 compared to HG002.
 
 ## Overview
 For the AJ trio 2038 mendelian violations were identified. 
 With 1323 classified as cell-line somatic or de novo mutations, 1110 SNPs and 213 indels). 
+
+## Summary
+- Chinese Trio larger high confidence region, especially son compared to AJ trio. Most likely due to differences in SV filter region size. 
+- The total number of high confidence variants is similar across genomes, but the number of high confidence indels and indels in the high confidence region are higher in the AJ trio compare to the Asian trio. 
+- Compared to the other genomes the Chinese trio parents had a higher proportion of variants excluded from the high confidence callset that were filtered but where the callsets were in agreement. This is potentially due to the additional datasets used to generate the non-Chinese parents callsets. 
+- Comparison of benchmarking results for HG002-HG006, HG005 and HG006 had lower recall for Indels compared to the AJ trio genomes. Digging into the metrics for the stratifications, HG005 and HG006 had lower recall for di-nucleotide tandem repeats between 51 and 200 bp in length.  
+    - HG006 and HG007 had lower coverage 2X250 HiSeq data (100X v. 300X) as well as no SOLID or Ion Torrent data.
 
 ## Call set comparisons 
 
@@ -31,15 +38,13 @@ Compare
 ```{r}
 grch37 <- "BSgenome.Hsapiens.1000genomes.hs37d5"
 high_conf_bed_files <- list.files("data", 
-                                  pattern = "highconf.*bed", 
-                                  recursive = TRUE, 
+                                  pattern = "highconf_noinconsistent.bed", 
                                   full.names = TRUE) %>% 
     set_names(str_extract(., "HG00."))
 
 high_conf_beds <- high_conf_bed_files %>% 
     map(import, genome = grch37)
 ```
-
 
 Non-N chrom sizes
 ```{r}
@@ -126,15 +131,17 @@ metric_df %>%
 get_var_summary_df <- function(vcf){
     ## full genome
     nvar <- nrow(vcf)
-    # ti_lgl <- isTransition(vcf)
-    # titv <- sum(ti_lgl)/sum(!ti_lgl)
+    indel <- sum(isIndel(vcf, singleAltOnly = FALSE))
+    snp <- sum(isSNV(vcf, singleAltOnly = FALSE))
     
     ## Metrics for individual chromosomes
     for(i in 1:22){
         chrom_vcf <- subset(vcf, seqnames(vcf) == i)
         nvar <- c(nvar, nrow(chrom_vcf))
+        indel <- c(indel, sum(isIndel(vcf, singleAltOnly = FALSE)))
+        snp <- c(snp, sum(isSNV(vcf, singleAltOnly = FALSE)))
     }
-    data.frame(CHROM = 0:22, nvar)
+    data.frame(CHROM = 0:22, nvar, snp, indel)
 }
 
 read_and_summarize_vcf <- function(vcf_file, ref_genome = grch37){
@@ -159,27 +166,26 @@ if(file.exists("highconf_variant_df.RDS")){
 }
 ```
 
-
 ### High confidence variants in high confidence regions 
 Not sure if the HG005 triophased or *_highconf.vcf.gz should be use
 ```{bash}
 ## HG002 - different file format 
-bedtools intersect -header \
-    -a data/HG002_GRCh37_GIAB_highconf_CG-IllFB-IllGATKHC-Ion-10X-SOLID_CHROM1-22_v.3.3.2_highconf_triophased.vcf.gz \
-    -b data/HG002_GRCh37_GIAB_highconf_CG-IllFB-IllGATKHC-Ion-10X-SOLID_CHROM1-22_v.3.3.2_highconf_noinconsistent.bed \
-    > HG002_high_high.vcf
-    bgzip HG002_high_high.vcf
-    tabix HG002_high_high.vcf.gz
+#bedtools intersect -header \
+#    -a data/HG002_GRCh37_GIAB_highconf_CG-IllFB-IllGATKHC-Ion-10X-SOLID_CHROM1-22_v.3.3.2_highconf_triophased.vcf.gz \
+#    -b data/HG002_GRCh37_GIAB_highconf_CG-IllFB-IllGATKHC-Ion-10X-SOLID_CHROM1-22_v.3.3.2_highconf_noinconsistent.bed \
+#    > HG002_high_high.vcf
+#    bgzip HG002_high_high.vcf
+#    tabix HG002_high_high.vcf.gz
     
 
-for i in 3 4 5 6 7; do
-    ## Get high confidence variants in high confidence regions
-    bedtools intersect -header \
-        -a data/HG00${i}*_highconf.vcf.gz \
-        -b data/HG00${i}*_highconf_noinconsistent.bed > HG00${i}_high_high.vcf
-    bgzip HG00${i}_high_high.vcf
-    tabix HG00${i}_high_high.vcf.gz
-done
+#for i in 3 4 5 6 7; do
+#    ## Get high confidence variants in high confidence regions
+#    bedtools intersect -header \
+#        -a data/HG00${i}*_highconf.vcf.gz \
+#        -b data/HG00${i}*_highconf_noinconsistent.bed > HG00${i}_high_high.vcf
+#    bgzip HG00${i}_high_high.vcf
+#   tabix HG00${i}_high_high.vcf.gz
+#done
 
 
 ## Calculate summary statistics
@@ -205,8 +211,8 @@ if(file.exists("highhigh_variant_df.RDS")){
     highhigh_variant_df <- list.files(".", 
                            pattern = "high_high.vcf.gz$", 
                            full.names = TRUE) %>% 
-    set_names(str_extract(.,"HG00.")) %>% 
-    map_dfr(read_and_summarize_vcf, .id = "hgref")
+        set_names(str_extract(.,"HG00.")) %>% 
+        map_dfr(read_and_summarize_vcf, .id = "hgref")
     
     ## Save file to prevent having to run code again
     saveRDS(highhigh_variant_df, "highhigh_variant_df.RDS")
@@ -217,52 +223,63 @@ if(file.exists("highhigh_variant_df.RDS")){
 ### Combining
 ```{r}
 hc <- highconf_variant_df %>% 
-    dplyr:: rename(highconf = nvar)
-```
+    dplyr:: rename(hc_total = nvar,
+                   hc_snp = snp,
+                   hc_indel = indel)
 
-
-```{r}
 hh <- highhigh_variant_df %>% 
-    dplyr::rename(highhigh = nvar)
+    dplyr::rename(hh_total = nvar,
+                   hh_snp = snp,
+                   hh_indel = indel)
 
 v_df <- left_join(hc, hh) %>% 
     mutate(chrom = if_else(CHROM == 0, "genome", paste0("chr", CHROM))) %>% 
     dplyr::select(-CHROM)
-```
 
-
-```{r}
 metric_df <- cov_df %>% 
     dplyr::select(hgref, chrom, count, frac_non_N) %>% 
     left_join(v_df)
 ```
 
 ## Whole Genome Summary Table
-TODO - multiple entries for HG005, HG006, HG007 - these are for the bed files with and without inconsistencies
 ```{r}
-metric_df %>% filter(chrom == "genome") %>% distinct() %>% 
-    knitr::kable(digits = 3) 
+metric_df %>% filter(chrom == "genome") %>% 
+    knitr::kable(digits = 3,format.args = list(big.mark = ",")) 
 ```
+
+```{r}
+metric_df %>% filter(chrom == "genome") %>% 
+    distinct() %>% as.tibble()
+```
+
 
 
 ## Variant Filter Reasons
 
 Getting variant filter counts for each individual
 ```{bash}
-for i in 5 6 7; do
-    zgrep -v ^# data/HG00${i}*_all.vcf.gz | \
-        awk 'length($4)+length($5)>2' | \
-        cut -f7 | sort | uniq -c > HG00${i}_filter.counts
-done
+# for i in 2 3 4 5 6 7; do
+#    zgrep -v ^# data/HG00${i}*_all.vcf.gz | \
+#        awk 'length($4)+length($5)>2' | \
+#        cut -f7 | sort | uniq -c > HG00${i}_filter.counts
+# done
 ```
 
 
-TODO- Combine and print as table 
-```{r}
-list.files(".", pattern = "*_filter.counts") %>% 
+```{r message = FALSE}
+filter_count_df <- list.files(".", pattern = "*_filter.counts") %>% 
     set_names(str_extract(., "HG00.")) %>% 
-    map_dfr(read_tsv, col_names = NULL)
+    map_dfr(read_csv,
+            col_names = FALSE,
+            .id = "hgref") %>% 
+    separate(X1, c("count", "Filter"),sep = " ") %>% 
+    mutate(count = as.integer(count))
 ```
+
+```{r}
+filter_count_df  %>% spread(hgref, count) 
+```
+
 
 ## SV Bed file comparisons
 
@@ -290,4 +307,138 @@ awk '{ sum+=$3; sum-=$2 } END { print sum }' data/HG005_HG006_HG007_FB_GATKHC_CG
 |Asian Son  |  15,826,002 |
 
 The Asian Trio bed file is an order of magnitute larger than the Asian son SV bed file.
+
+
+## Benchmarking output comparison
+Objective - summary stable comparing benchmarking overall numbers
+Identify stratifications where HG006 has lower precision/ recal
+```{r, message = FALSE}
+
+# HG002 Strafied output
+strat_hg002 <- readxl::read_excel("data/output.extended_HG2_sentieon.xlsx") 
+
+# HG005 Stratified output
+strat_hg005 <- readxl::read_excel("data/output.extended_HG5_sentieon.xlsx")
+
+# HG006 Stratified output
+strat_hg006 <- read_csv("data/HG006_GATK4_benchmark/result_1.extended.csv")
+
+
+## Genome Comparison
+bench_genome_comp <- readxl::read_excel("data/precisonFDA_sentieonvs3.3.2bygenome.xlsx")
+hg006_comp_tbl <- strat_hg006 %>% 
+    filter(Subtype == "*", Subset == "*", Filter == "PASS") %>% 
+    select(Type, METRIC.Recall, METRIC.Precision, METRIC.Frac_NA) %>% 
+    add_column(Genome = "HG006")
+genome_comp_tbl <- bench_genome_comp %>% 
+    filter(Subtype == "*", Subset == "all", Filter == "PASS") %>% 
+    select(Genome, Type, METRIC.Recall, METRIC.Precision, METRIC.Frac_NA) %>% 
+    bind_rows(hg006_comp_tbl)
+```
+
+Genome wide performance metrics
+```{r}
+genome_comp_tbl %>% 
+    arrange(Type, Genome)
+```
+
+### Stratification Comparison
+```{r}
+strat_hg006 %>% 
+    filter(Filter == "PASS", 
+           Subtype == "*",
+           Subset.IS_CONF.Size > 1000,
+           Type == "INDEL") %>% 
+    ggplot() + geom_density(aes(x = METRIC.Recall))
+```
+
+
+Only looking at the stratifications with the 20 lowest recall values. 
+Low complexity tandem repeats had the lowest Recall
+```{r}
+strat_hg006 %>% 
+    filter(Filter == "PASS", 
+           Subtype == "*",
+           # Subset.IS_CONF.Size > 1000,
+           QUERY.TOTAL > 100, 
+           Type == "INDEL", METRIC.Recall < 0.97) %>% 
+    select(Subset, METRIC.Recall, METRIC.Precision, QUERY.TOTAL, Subset.Size, Subset.IS_CONF.Size) %>% 
+    arrange(METRIC.Recall) %>% top_n(20, -METRIC.Recall) %>% 
+    DT::datatable()
+``` 
+
+Recall is low complexity di-tandem repeats 51 bp to 200 bp in length were low for HG005 and HG006 compared to HG002
+```{r}
+get_simple_repeat_df <- function(strat_df){
+    strat_df %>% 
+        filter(Filter == "PASS", 
+           Subtype == "*",
+           Genotype == "*",
+           Type == "INDEL") %>% 
+    filter(!str_detect(Subset, "_unit="), str_detect(Subset, "SimpleRepeat")) %>% 
+    select(Type, Subset, METRIC.Recall, METRIC.Precision, QUERY.TOTAL)
+}
+
+sim_rep_comp_df <- list(HG002= strat_hg002, 
+                        HG005 = strat_hg005, 
+                        HG006 = strat_hg006) %>% 
+    map_dfr(get_simple_repeat_df, .id = "hgref")
+```
+
+Recall comparison across genomes for simple repeats
+```{r}
+sim_rep_comp_df %>% 
+    select(hgref, Subset, METRIC.Recall) %>% 
+    spread(hgref, METRIC.Recall) %>% 
+    arrange(HG002)
+```
+
+Scatter plots comparing recall for simple repeats between HG002, HG005, and HG006. 
+```{r}
+sim_rep_comp_df %>% 
+    select(hgref, Subset, METRIC.Recall) %>% 
+    spread(hgref, METRIC.Recall) %>% 
+    filter(HG005 != 0) %>% 
+    ggplot() + 
+    geom_abline(aes(slope = 1, intercept = 0)) + 
+    geom_point(aes(x = HG002, y = HG005), color = "darkorange") + 
+    theme_bw()
+    
+```
+
+
+```{r}
+sim_rep_comp_df %>% 
+    select(hgref, Subset, METRIC.Recall) %>% 
+    spread(hgref, METRIC.Recall) %>% 
+    filter(HG005 != 0) %>% 
+    ggplot() + 
+    geom_abline(aes(slope = 1, intercept = 0)) + 
+    geom_point(aes(x = HG002, y = HG006), color = "darkorange") + 
+    theme_bw()
+```
+
+```{r}
+sim_rep_comp_df %>% 
+    select(hgref, Subset, METRIC.Recall) %>% 
+    spread(hgref, METRIC.Recall) %>% 
+    filter(HG005 != 0) %>% 
+    ggplot() + 
+    geom_abline(aes(slope = 1, intercept = 0)) + 
+    geom_point(aes(x = HG005, y = HG006), color = "darkorange") + 
+    theme_bw()
+```
+
+diTR 51 to 200 is the outlier 
+Subset size for diTR 51 to 200 is 263K 
+```{r}
+strat_hg006 %>% 
+    filter(Filter == "PASS", 
+           Subtype == "*",
+           # Subset.IS_CONF.Size > 1000,
+           # QUERY.TOTAL > 100, 
+           Type == "INDEL") %>% 
+    filter(!str_detect(Subset, "_unit="), str_detect(Subset, "SimpleRepeat")) %>% 
+    select(Type, Subset, METRIC.Recall, METRIC.Precision, QUERY.TOTAL, Subset.Size, Subset.IS_CONF.Size)
+```
 
